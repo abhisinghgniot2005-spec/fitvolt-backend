@@ -28,6 +28,7 @@ const memberSchema = new mongoose.Schema(
     plan: { type: String, default: "", trim: true },
     joiningDate: { type: String, default: "" },
     amount: { type: Number, default: 0 },
+    paymentMethod: { type: String, default: "Cash", trim: true },
     address: { type: String, default: "", trim: true },
   },
   { timestamps: true }
@@ -161,6 +162,7 @@ app.post("/api/members", async (req, res) => {
       plan,
       joiningDate,
       amount,
+      paymentMethod,
       address,
     } = req.body;
 
@@ -180,6 +182,7 @@ app.post("/api/members", async (req, res) => {
       plan: plan || "",
       joiningDate: joiningDate || "",
       amount: Number(amount) || 0,
+      paymentMethod: paymentMethod || "Cash",
       address: address || "",
     });
 
@@ -280,6 +283,7 @@ app.put("/api/members/:id", async (req, res) => {
       plan,
       joiningDate,
       amount,
+      paymentMethod,
       address,
     } = req.body;
 
@@ -301,6 +305,7 @@ app.put("/api/members/:id", async (req, res) => {
         plan: plan || "",
         joiningDate: joiningDate || "",
         amount: Number(amount) || 0,
+        ...(paymentMethod ? { paymentMethod } : {}),
         address: address || "",
       },
       {
@@ -374,9 +379,9 @@ app.delete("/api/members/:id", async (req, res) => {
 // =========================
 
 async function generateReceiptNumber() {
-  const count = await Payment.countDocuments();
-
-  return `FV-${String(count + 1).padStart(4, "0")}`;
+  const lastPayment = await Payment.findOne({ receiptNumber: { $regex: /^FV-/ } }).sort({ createdAt: -1 }).select("receiptNumber").lean();
+  const lastNumber = Number(String(lastPayment?.receiptNumber || "").replace(/^FV-/, "")) || 0;
+  return `FV-${String(Math.max(lastNumber + 1, Date.now() % 100000000)).padStart(8, "0")}`;
 }
 
 // ADD PAYMENT
