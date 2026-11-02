@@ -12,7 +12,7 @@ const PORT = process.env.PORT || 5000;
 // =========================
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "3mb" }));
 
 // =========================
 // MEMBER MODEL
@@ -30,6 +30,9 @@ const memberSchema = new mongoose.Schema(
     amount: { type: Number, default: 0 },
     paymentMethod: { type: String, default: "Cash", trim: true },
     address: { type: String, default: "", trim: true },
+
+    // Single customer photo
+    photo: { type: String, default: "" },
   },
   { timestamps: true }
 );
@@ -147,6 +150,42 @@ const FranchiseLead = mongoose.model(
 );
 
 // =========================
+// CUSTOMER PHOTO VALIDATION
+// =========================
+
+// JPEG, PNG and WEBP allowed.
+// Maximum original photo size: 2 MB.
+
+function isValidMemberPhoto(photo) {
+  if (
+    photo === undefined ||
+    photo === null ||
+    photo === ""
+  ) {
+    return true;
+  }
+
+  if (typeof photo !== "string") {
+    return false;
+  }
+
+  const validFormat =
+    /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/;
+
+  if (!validFormat.test(photo)) {
+    return false;
+  }
+
+  const base64 = photo.split(",")[1] || "";
+
+  const estimatedBytes = Math.floor(
+    (base64.length * 3) / 4
+  );
+
+  return estimatedBytes <= 2.2 * 1024 * 1024;
+}
+
+// =========================
 // MEMBER ROUTES
 // =========================
 
@@ -164,12 +203,21 @@ app.post("/api/members", async (req, res) => {
       amount,
       paymentMethod,
       address,
+      photo,
     } = req.body;
 
     if (!name || !mobile) {
       return res.status(400).json({
         success: false,
         message: "Name and mobile are required",
+      });
+    }
+
+    if (!isValidMemberPhoto(photo)) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Invalid photo. Use JPEG, PNG or WEBP up to 2 MB.",
       });
     }
 
@@ -184,6 +232,7 @@ app.post("/api/members", async (req, res) => {
       amount: Number(amount) || 0,
       paymentMethod: paymentMethod || "Cash",
       address: address || "",
+      photo: photo || "",
     });
 
     const savedMember = await member.save();
@@ -285,12 +334,21 @@ app.put("/api/members/:id", async (req, res) => {
       amount,
       paymentMethod,
       address,
+      photo,
     } = req.body;
 
     if (!name || !mobile) {
       return res.status(400).json({
         success: false,
         message: "Name and mobile are required",
+      });
+    }
+
+    if (!isValidMemberPhoto(photo)) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Invalid photo. Use JPEG, PNG or WEBP up to 2 MB.",
       });
     }
 
@@ -307,6 +365,11 @@ app.put("/api/members/:id", async (req, res) => {
         amount: Number(amount) || 0,
         ...(paymentMethod ? { paymentMethod } : {}),
         address: address || "",
+
+        // Update or remove photo only when photo is provided
+        ...(photo !== undefined
+          ? { photo: photo || "" }
+          : {}),
       },
       {
         new: true,
@@ -379,9 +442,22 @@ app.delete("/api/members/:id", async (req, res) => {
 // =========================
 
 async function generateReceiptNumber() {
-  const lastPayment = await Payment.findOne({ receiptNumber: { $regex: /^FV-/ } }).sort({ createdAt: -1 }).select("receiptNumber").lean();
-  const lastNumber = Number(String(lastPayment?.receiptNumber || "").replace(/^FV-/, "")) || 0;
-  return `FV-${String(Math.max(lastNumber + 1, Date.now() % 100000000)).padStart(8, "0")}`;
+  const lastPayment = await Payment.findOne({
+    receiptNumber: { $regex: /^FV-/ },
+  })
+    .sort({ createdAt: -1 })
+    .select("receiptNumber")
+    .lean();
+
+  const lastNumber =
+    Number(
+      String(lastPayment?.receiptNumber || "")
+        .replace(/^FV-/, "")
+    ) || 0;
+
+  return `FV-${String(
+    Math.max(lastNumber + 1, Date.now() % 100000000)
+  ).padStart(8, "0")}`;
 }
 
 // ADD PAYMENT
@@ -517,9 +593,7 @@ app.get(
       const { memberId } = req.params;
 
       if (
-        !mongoose.Types.ObjectId.isValid(
-          memberId
-        )
+        !mongoose.Types.ObjectId.isValid(memberId)
       ) {
         return res.status(400).json({
           success: false,
@@ -729,9 +803,7 @@ app.post(
         Number(capital);
 
       if (
-        !Number.isFinite(
-          capitalAmount
-        ) ||
+        !Number.isFinite(capitalAmount) ||
         capitalAmount < 0
       ) {
         return res.status(400).json({
@@ -825,9 +897,7 @@ app.delete(
       }
 
       const deletedLead =
-        await FranchiseLead.findByIdAndDelete(
-          id
-        );
+        await FranchiseLead.findByIdAndDelete(id);
 
       if (!deletedLead) {
         return res.status(404).json({
@@ -885,50 +955,21 @@ app.use((req, res) => {
 // START SERVER
 // =========================
 
-async function startServer() {
-  try {
-    if (!process.env.MONGO_URI) {
-      throw new Error(
-        "MONGO_URI is missing in .env"
-      );
-    }
+async function generateReceiptNumber() {
+  const lastPayment = await Payment.findOne({
+    receiptNumber: { $regex: /^FV-/ },
+  })
+    .sort({ createdAt: -1 })
+    .select("receiptNumber")
+    .lean();
 
-    await mongoose.connect(
-      process.env.MONGO_URI,
-      {
-        serverSelectionTimeoutMS: 10000,
-        connectTimeoutMS: 10000,
-      }
-    );
+  const lastNumber =
+    Number(
+      String(lastPayment?.receiptNumber || "")
+        .replace(/^FV-/, "")
+    ) || 0;
 
-    console.log(
-      "✅ MongoDB connected successfully"
-    );
-
-    console.log(
-      "📦 Database:",
-      mongoose.connection.name
-    );
-
-    console.log(
-      "🌐 Host:",
-      mongoose.connection.host
-    );
-
-    app.listen(PORT, () => {
-      console.log(
-        `🚀 Server running on http://localhost:${PORT}`
-      );
-    });
-  } catch (error) {
-    console.error(
-      "❌ MongoDB connection failed:"
-    );
-
-    console.error(error.message);
-
-    process.exit(1);
-  }
+  return `FV-${String(
+    Math.max(lastNumber + 1, Date.now() % 100000000)
+  ).padStart(8, "0")}`;
 }
-
-startServer();
