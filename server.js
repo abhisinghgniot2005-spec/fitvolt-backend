@@ -13,6 +13,7 @@ const PORT = process.env.PORT || 5000;
 
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 // =========================
 // MEMBER MODEL
@@ -29,10 +30,12 @@ const memberSchema = new mongoose.Schema(
     joiningDate: { type: String, default: "" },
     amount: { type: Number, default: 0 },
     paymentMethod: { type: String, default: "Cash", trim: true },
-    address: { type: String, default: "", trim: true },
+    shift: { type: String, default: "Morning", trim: true },
 
-    // Single customer photo
+    // Member photo stored as compressed image data
     photo: { type: String, default: "" },
+
+    address: { type: String, default: "", trim: true },
   },
   { timestamps: true }
 );
@@ -50,48 +53,46 @@ const paymentSchema = new mongoose.Schema(
       ref: "Member",
       default: null,
     },
-
     memberName: {
       type: String,
       required: true,
       trim: true,
     },
-
+    // Snapshot member details on each payment so receipts remain complete
+    // even if the member record is edited or deleted later.
+    memberPhoto: { type: String, default: "" },
+    memberMobile: { type: String, default: "", trim: true },
+    memberAddress: { type: String, default: "", trim: true },
+    memberShift: { type: String, default: "Morning", trim: true },
     amount: {
       type: Number,
       required: true,
       min: 1,
     },
-
     paymentDate: {
       type: String,
       required: true,
     },
-
     paymentMethod: {
       type: String,
       required: true,
       trim: true,
     },
-
     membershipPlan: {
       type: String,
       default: "",
       trim: true,
     },
-
     notes: {
       type: String,
       default: "",
       trim: true,
     },
-
     status: {
       type: String,
       default: "Paid",
       trim: true,
     },
-
     receiptNumber: {
       type: String,
       default: "",
@@ -109,39 +110,13 @@ const Payment = mongoose.model("Payment", paymentSchema);
 
 const franchiseLeadSchema = new mongoose.Schema(
   {
-    name: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-
-    mobile: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-
-    email: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-
-    city: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-
-    capital: {
-      type: Number,
-      required: true,
-      min: 0,
-    },
+    name: { type: String, required: true, trim: true },
+    mobile: { type: String, required: true, trim: true },
+    email: { type: String, required: true, trim: true },
+    city: { type: String, required: true, trim: true },
+    capital: { type: Number, required: true, min: 0 },
   },
-  {
-    timestamps: true,
-  }
+  { timestamps: true }
 );
 
 const FranchiseLead = mongoose.model(
@@ -150,18 +125,12 @@ const FranchiseLead = mongoose.model(
 );
 
 // =========================
-// CUSTOMER PHOTO VALIDATION
+// MEMBER PHOTO VALIDATION
 // =========================
 
-// JPEG, PNG and WEBP allowed.
-// Maximum original photo size: 2 MB.
-
+// Accept JPEG, PNG and WEBP data URLs up to approximately 2 MB decoded size.
 function isValidMemberPhoto(photo) {
-  if (
-    photo === undefined ||
-    photo === null ||
-    photo === ""
-  ) {
+  if (photo === undefined || photo === null || photo === "") {
     return true;
   }
 
@@ -170,17 +139,14 @@ function isValidMemberPhoto(photo) {
   }
 
   const validFormat =
-    /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/;
+    /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/;
 
   if (!validFormat.test(photo)) {
     return false;
   }
 
   const base64 = photo.split(",")[1] || "";
-
-  const estimatedBytes = Math.floor(
-    (base64.length * 3) / 4
-  );
+  const estimatedBytes = Math.floor((base64.length * 3) / 4);
 
   return estimatedBytes <= 2.2 * 1024 * 1024;
 }
@@ -202,8 +168,9 @@ app.post("/api/members", async (req, res) => {
       joiningDate,
       amount,
       paymentMethod,
-      address,
+      shift,
       photo,
+      address,
     } = req.body;
 
     if (!name || !mobile) {
@@ -216,8 +183,7 @@ app.post("/api/members", async (req, res) => {
     if (!isValidMemberPhoto(photo)) {
       return res.status(400).json({
         success: false,
-        message:
-          "Invalid photo. Use JPEG, PNG or WEBP up to 2 MB.",
+        message: "Invalid photo. Use JPEG, PNG or WEBP up to 2 MB.",
       });
     }
 
@@ -231,8 +197,9 @@ app.post("/api/members", async (req, res) => {
       joiningDate: joiningDate || "",
       amount: Number(amount) || 0,
       paymentMethod: paymentMethod || "Cash",
-      address: address || "",
+      shift: shift || "Morning",
       photo: photo || "",
+      address: address || "",
     });
 
     const savedMember = await member.save();
@@ -253,7 +220,7 @@ app.post("/api/members", async (req, res) => {
   }
 });
 
-// GET ALL MEMBERS
+// GET ALL MEMBERS (INCLUDING PHOTOS)
 app.get("/api/members", async (req, res) => {
   try {
     const members = await Member.find({})
@@ -333,8 +300,9 @@ app.put("/api/members/:id", async (req, res) => {
       joiningDate,
       amount,
       paymentMethod,
-      address,
+      shift,
       photo,
+      address,
     } = req.body;
 
     if (!name || !mobile) {
@@ -347,30 +315,35 @@ app.put("/api/members/:id", async (req, res) => {
     if (!isValidMemberPhoto(photo)) {
       return res.status(400).json({
         success: false,
-        message:
-          "Invalid photo. Use JPEG, PNG or WEBP up to 2 MB.",
+        message: "Invalid photo. Use JPEG, PNG or WEBP up to 2 MB.",
       });
+    }
+
+    const updateData = {
+      name: name.trim(),
+      mobile: mobile.trim(),
+      email: email || "",
+      gender: gender || "",
+      dob: dob || "",
+      plan: plan || "",
+      joiningDate: joiningDate || "",
+      amount: Number(amount) || 0,
+      shift: shift || "Morning",
+      address: address || "",
+    };
+
+    if (paymentMethod !== undefined) {
+      updateData.paymentMethod = paymentMethod;
+    }
+
+    // Preserve existing photo if photo is not sent.
+    if (photo !== undefined) {
+      updateData.photo = photo;
     }
 
     const updatedMember = await Member.findByIdAndUpdate(
       id,
-      {
-        name: name.trim(),
-        mobile: mobile.trim(),
-        email: email || "",
-        gender: gender || "",
-        dob: dob || "",
-        plan: plan || "",
-        joiningDate: joiningDate || "",
-        amount: Number(amount) || 0,
-        ...(paymentMethod ? { paymentMethod } : {}),
-        address: address || "",
-
-        // Update or remove photo only when photo is provided
-        ...(photo !== undefined
-          ? { photo: photo || "" }
-          : {}),
-      },
+      updateData,
       {
         new: true,
         runValidators: true,
@@ -412,8 +385,7 @@ app.delete("/api/members/:id", async (req, res) => {
       });
     }
 
-    const deletedMember =
-      await Member.findByIdAndDelete(id);
+    const deletedMember = await Member.findByIdAndDelete(id);
 
     if (!deletedMember) {
       return res.status(404).json({
@@ -450,10 +422,7 @@ async function generateReceiptNumber() {
     .lean();
 
   const lastNumber =
-    Number(
-      String(lastPayment?.receiptNumber || "")
-        .replace(/^FV-/, "")
-    ) || 0;
+    Number(String(lastPayment?.receiptNumber || "").replace(/^FV-/, "")) || 0;
 
   return `FV-${String(
     Math.max(lastNumber + 1, Date.now() % 100000000)
@@ -475,10 +444,7 @@ app.post("/api/payments", async (req, res) => {
       status,
     } = req.body;
 
-    if (
-      !memberId ||
-      !mongoose.Types.ObjectId.isValid(memberId)
-    ) {
+    if (!memberId || !mongoose.Types.ObjectId.isValid(memberId)) {
       return res.status(400).json({
         success: false,
         message: "Valid member ID is required",
@@ -506,50 +472,36 @@ app.post("/api/payments", async (req, res) => {
       });
     }
 
-    const receiptNumber =
-      await generateReceiptNumber();
+    const receiptNumber = await generateReceiptNumber();
 
     const payment = new Payment({
       memberId: member._id,
-
-      memberName:
-        memberName || member.name,
-
+      memberName: memberName || member.name,
+      memberPhoto: member.photo || "",
+      memberMobile: member.mobile || "",
+      memberAddress: member.address || "",
+      memberShift: member.shift || "Morning",
       amount: Number(amount),
-
       paymentDate:
-        paymentDate ||
-        new Date().toISOString().slice(0, 10),
-
-      paymentMethod:
-        paymentMethod || "Cash",
-
+        paymentDate || new Date().toISOString().slice(0, 10),
+      paymentMethod: paymentMethod || "Cash",
       membershipPlan:
-        membershipPlan ||
-        plan ||
-        member.plan ||
-        "",
-
+        membershipPlan || plan || member.plan || "",
       notes: notes || "",
-
       status: status || "Paid",
-
       receiptNumber,
     });
 
-    const savedPayment =
-      await payment.save();
+    const savedPayment = await payment.save();
 
     res.status(201).json({
       success: true,
       message: "Payment added successfully",
       payment: savedPayment,
+      memberPhoto: member.photo || "",
     });
   } catch (error) {
-    console.error(
-      "Add payment error:",
-      error
-    );
+    console.error("Add payment error:", error);
 
     res.status(500).json({
       success: false,
@@ -562,20 +514,16 @@ app.post("/api/payments", async (req, res) => {
 // GET ALL PAYMENTS
 app.get("/api/payments", async (req, res) => {
   try {
-    const payments =
-      await Payment.find({})
-        .sort({ createdAt: -1 })
-        .lean();
+    const payments = await Payment.find({})
+      .sort({ createdAt: -1 })
+      .lean();
 
     res.json({
       success: true,
       payments,
     });
   } catch (error) {
-    console.error(
-      "Get payments error:",
-      error
-    );
+    console.error("Get payments error:", error);
 
     res.status(500).json({
       success: false,
@@ -586,347 +534,265 @@ app.get("/api/payments", async (req, res) => {
 });
 
 // GET PAYMENTS OF ONE MEMBER
-app.get(
-  "/api/payments/member/:memberId",
-  async (req, res) => {
-    try {
-      const { memberId } = req.params;
+app.get("/api/payments/member/:memberId", async (req, res) => {
+  try {
+    const { memberId } = req.params;
 
-      if (
-        !mongoose.Types.ObjectId.isValid(memberId)
-      ) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid member ID",
-        });
-      }
-
-      const payments =
-        await Payment.find({
-          memberId,
-        })
-          .sort({
-            paymentDate: -1,
-            createdAt: -1,
-          })
-          .lean();
-
-      res.json({
-        success: true,
-        payments,
-      });
-    } catch (error) {
-      console.error(
-        "Get member payments error:",
-        error
-      );
-
-      res.status(500).json({
+    if (!mongoose.Types.ObjectId.isValid(memberId)) {
+      return res.status(400).json({
         success: false,
-        message:
-          "Failed to fetch member payments",
-        error: error.message,
+        message: "Invalid member ID",
       });
     }
+
+    const payments = await Payment.find({ memberId })
+      .sort({
+        paymentDate: -1,
+        createdAt: -1,
+      })
+      .lean();
+
+    res.json({
+      success: true,
+      payments,
+    });
+  } catch (error) {
+    console.error("Get member payments error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch member payments",
+      error: error.message,
+    });
   }
-);
+});
 
 // DELETE PAYMENT
-app.delete(
-  "/api/payments/:id",
-  async (req, res) => {
-    try {
-      const { id } = req.params;
+app.delete("/api/payments/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
 
-      if (
-        !mongoose.Types.ObjectId.isValid(id)
-      ) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid payment ID",
-        });
-      }
-
-      const deletedPayment =
-        await Payment.findByIdAndDelete(id);
-
-      if (!deletedPayment) {
-        return res.status(404).json({
-          success: false,
-          message: "Payment not found",
-        });
-      }
-
-      res.json({
-        success: true,
-        message:
-          "Payment deleted successfully",
-      });
-    } catch (error) {
-      console.error(
-        "Delete payment error:",
-        error
-      );
-
-      res.status(500).json({
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
         success: false,
-        message:
-          "Failed to delete payment",
-        error: error.message,
+        message: "Invalid payment ID",
       });
     }
+
+    const deletedPayment = await Payment.findByIdAndDelete(id);
+
+    if (!deletedPayment) {
+      return res.status(404).json({
+        success: false,
+        message: "Payment not found",
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Payment deleted successfully",
+    });
+  } catch (error) {
+    console.error("Delete payment error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to delete payment",
+      error: error.message,
+    });
   }
-);
+});
 
 // TOTAL COLLECTION
-app.get(
-  "/api/payments/stats/collection",
-  async (req, res) => {
-    try {
-      const result =
-        await Payment.aggregate([
-          {
-            $match: {
-              status: "Paid",
-            },
+app.get("/api/payments/stats/collection", async (req, res) => {
+  try {
+    const result = await Payment.aggregate([
+      {
+        $match: {
+          status: "Paid",
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          total: {
+            $sum: "$amount",
           },
-          {
-            $group: {
-              _id: null,
-              total: {
-                $sum: "$amount",
-              },
-            },
-          },
-        ]);
+        },
+      },
+    ]);
 
-      const totalCollection =
-        result.length > 0
-          ? result[0].total
-          : 0;
+    const totalCollection =
+      result.length > 0 ? result[0].total : 0;
 
-      res.json({
-        success: true,
-        totalCollection,
-      });
-    } catch (error) {
-      console.error(
-        "Collection stats error:",
-        error
-      );
+    res.json({
+      success: true,
+      totalCollection,
+    });
+  } catch (error) {
+    console.error("Collection stats error:", error);
 
-      res.status(500).json({
-        success: false,
-        message:
-          "Failed to calculate collection",
-        error: error.message,
-      });
-    }
+    res.status(500).json({
+      success: false,
+      message: "Failed to calculate collection",
+      error: error.message,
+    });
   }
-);
+});
 
 // BACKWARD COMPATIBILITY
-app.get(
-  "/api/payments/total",
-  async (req, res) => {
-    try {
-      const result =
-        await Payment.aggregate([
-          {
-            $group: {
-              _id: null,
-              total: {
-                $sum: "$amount",
-              },
-            },
+app.get("/api/payments/total", async (req, res) => {
+  try {
+    const result = await Payment.aggregate([
+      {
+        $group: {
+          _id: null,
+          total: {
+            $sum: "$amount",
           },
-        ]);
+        },
+      },
+    ]);
 
-      const total =
-        result.length > 0
-          ? result[0].total
-          : 0;
+    const total = result.length > 0 ? result[0].total : 0;
 
-      res.json({
-        success: true,
-        total,
-      });
-    } catch (error) {
-      console.error(
-        "Get total collection error:",
-        error
-      );
+    res.json({
+      success: true,
+      total,
+    });
+  } catch (error) {
+    console.error("Get total collection error:", error);
 
-      res.status(500).json({
-        success: false,
-        message:
-          "Failed to calculate total collection",
-        error: error.message,
-      });
-    }
+    res.status(500).json({
+      success: false,
+      message: "Failed to calculate total collection",
+      error: error.message,
+    });
   }
-);
+});
 
 // =========================
 // FRANCHISE ROUTES
 // =========================
 
 // ADD FRANCHISE LEAD
-app.post(
-  "/api/franchise-leads",
-  async (req, res) => {
-    try {
-      const {
-        name,
-        mobile,
-        email,
-        city,
-        capital,
-      } = req.body;
+app.post("/api/franchise-leads", async (req, res) => {
+  try {
+    const {
+      name,
+      mobile,
+      email,
+      city,
+      capital,
+    } = req.body;
 
-      if (
-        !name?.trim() ||
-        !mobile?.trim() ||
-        !email?.trim() ||
-        !city?.trim() ||
-        capital === undefined ||
-        capital === ""
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Name, mobile, email, city and capital are required",
-        });
-      }
-
-      const capitalAmount =
-        Number(capital);
-
-      if (
-        !Number.isFinite(capitalAmount) ||
-        capitalAmount < 0
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Please enter a valid investment capital",
-        });
-      }
-
-      const lead =
-        new FranchiseLead({
-          name: name.trim(),
-          mobile: mobile.trim(),
-          email: email.trim(),
-          city: city.trim(),
-          capital: capitalAmount,
-        });
-
-      const savedLead =
-        await lead.save();
-
-      res.status(201).json({
-        success: true,
-        message:
-          "Franchise enquiry submitted successfully",
-        lead: savedLead,
-      });
-    } catch (error) {
-      console.error(
-        "Franchise lead error:",
-        error
-      );
-
-      res.status(500).json({
+    if (
+      !name?.trim() ||
+      !mobile?.trim() ||
+      !email?.trim() ||
+      !city?.trim() ||
+      capital === undefined ||
+      capital === ""
+    ) {
+      return res.status(400).json({
         success: false,
         message:
-          "Failed to submit franchise enquiry",
-        error: error.message,
+          "Name, mobile, email, city and capital are required",
       });
     }
+
+    const capitalAmount = Number(capital);
+
+    if (!Number.isFinite(capitalAmount) || capitalAmount < 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Please enter a valid investment capital",
+      });
+    }
+
+    const lead = new FranchiseLead({
+      name: name.trim(),
+      mobile: mobile.trim(),
+      email: email.trim(),
+      city: city.trim(),
+      capital: capitalAmount,
+    });
+
+    const savedLead = await lead.save();
+
+    res.status(201).json({
+      success: true,
+      message: "Franchise enquiry submitted successfully",
+      lead: savedLead,
+    });
+  } catch (error) {
+    console.error("Franchise lead error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to submit franchise enquiry",
+      error: error.message,
+    });
   }
-);
+});
 
 // GET ALL FRANCHISE LEADS
-app.get(
-  "/api/franchise-leads",
-  async (req, res) => {
-    try {
-      const leads =
-        await FranchiseLead.find({})
-          .sort({
-            createdAt: -1,
-          })
-          .lean();
+app.get("/api/franchise-leads", async (req, res) => {
+  try {
+    const leads = await FranchiseLead.find({})
+      .sort({ createdAt: -1 })
+      .lean();
 
-      res.json({
-        success: true,
-        leads,
-      });
-    } catch (error) {
-      console.error(
-        "Get franchise leads error:",
-        error
-      );
+    res.json({
+      success: true,
+      leads,
+    });
+  } catch (error) {
+    console.error("Get franchise leads error:", error);
 
-      res.status(500).json({
-        success: false,
-        message:
-          "Failed to fetch franchise leads",
-        error: error.message,
-      });
-    }
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch franchise leads",
+      error: error.message,
+    });
   }
-);
+});
 
 // DELETE FRANCHISE LEAD
-app.delete(
-  "/api/franchise-leads/:id",
-  async (req, res) => {
-    try {
-      const { id } = req.params;
+app.delete("/api/franchise-leads/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
 
-      if (
-        !mongoose.Types.ObjectId.isValid(id)
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Invalid franchise lead ID",
-        });
-      }
-
-      const deletedLead =
-        await FranchiseLead.findByIdAndDelete(id);
-
-      if (!deletedLead) {
-        return res.status(404).json({
-          success: false,
-          message:
-            "Franchise lead not found",
-        });
-      }
-
-      res.json({
-        success: true,
-        message:
-          "Franchise lead deleted successfully",
-      });
-    } catch (error) {
-      console.error(
-        "Delete franchise lead error:",
-        error
-      );
-
-      res.status(500).json({
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
         success: false,
-        message:
-          "Failed to delete franchise lead",
-        error: error.message,
+        message: "Invalid franchise lead ID",
       });
     }
+
+    const deletedLead = await FranchiseLead.findByIdAndDelete(id);
+
+    if (!deletedLead) {
+      return res.status(404).json({
+        success: false,
+        message: "Franchise lead not found",
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Franchise lead deleted successfully",
+    });
+  } catch (error) {
+    console.error("Delete franchise lead error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to delete franchise lead",
+      error: error.message,
+    });
   }
-);
+});
 
 // =========================
 // HEALTH CHECK
@@ -935,8 +801,7 @@ app.delete(
 app.get("/", (req, res) => {
   res.json({
     success: true,
-    message:
-      "Fit Volt Gym API is running",
+    message: "Fit Volt Gym API is running",
   });
 });
 
@@ -955,21 +820,29 @@ app.use((req, res) => {
 // START SERVER
 // =========================
 
-async function generateReceiptNumber() {
-  const lastPayment = await Payment.findOne({
-    receiptNumber: { $regex: /^FV-/ },
-  })
-    .sort({ createdAt: -1 })
-    .select("receiptNumber")
-    .lean();
+async function startServer() {
+  try {
+    if (!process.env.MONGO_URI) {
+      throw new Error("MONGO_URI is missing in environment variables");
+    }
 
-  const lastNumber =
-    Number(
-      String(lastPayment?.receiptNumber || "")
-        .replace(/^FV-/, "")
-    ) || 0;
+    await mongoose.connect(process.env.MONGO_URI, {
+      serverSelectionTimeoutMS: 10000,
+      connectTimeoutMS: 10000,
+    });
 
-  return `FV-${String(
-    Math.max(lastNumber + 1, Date.now() % 100000000)
-  ).padStart(8, "0")}`;
+    console.log("✅ MongoDB connected successfully");
+    console.log("📦 Database:", mongoose.connection.name);
+    console.log("🌐 Host:", mongoose.connection.host);
+
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`🚀 Server running on port ${PORT}`);
+    });
+  } catch (error) {
+    console.error("❌ MongoDB connection failed:");
+    console.error(error.message);
+    process.exit(1);
+  }
 }
+
+startServer();
